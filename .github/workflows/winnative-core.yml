@@ -1,0 +1,58 @@
+name: core
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [winnative]
+
+permissions:
+  contents: write
+
+env:
+  NDK_VERSION: 27.3.13750724
+  ABI: arm64-v8a
+  PLATFORM: android-26
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install NDK
+        run: |
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${NDK_VERSION}" > /dev/null
+          echo "NDK=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          "$NDK/ndk-build" -C "libretro/jni" APP_ABI="$ABI" APP_PLATFORM="$PLATFORM" -j"$(nproc)"
+
+      - name: Collect
+        run: |
+          mkdir -p dist
+          so="$(find . -path "*libs/$ABI/*.so" | head -1)"
+          if [ -z "$so" ]; then
+            echo "no .so produced" >&2
+            exit 1
+          fi
+          cp "$so" "dist/libsnes9x_libretro_android.so"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libsnes9x_libretro_android.so
+          path: dist/*.so
+          if-no-files-found: error
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view latest > /dev/null 2>&1; then
+            gh release create latest --title latest --notes "arm64-v8a libretro core, rebuilt from the winnative branch."
+          fi
+          gh release upload latest dist/*.so --clobber
+          gh release edit latest --notes "arm64-v8a libretro core built from ${GITHUB_SHA} on $(date -u +%Y-%m-%dT%H:%M:%SZ)"
