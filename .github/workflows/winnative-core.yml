@@ -79,19 +79,39 @@ jobs:
           echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "Merged $(git rev-list --count $before..$after) upstream commit(s)."
 
+      - name: Has the source changed since the last release?
+        id: src
+        run: |
+          # The last commit touching anything outside .github, so editing the
+          # workflow never triggers a rebuild. Compared against the commit the
+          # published release was built from: ARMSX2 and Dolphin do not compile
+          # reproducibly, so comparing the built bytes cannot decide this on its
+          # own -- an identical tree yields a different .so every time.
+          src=$(git log -1 --format=%H -- . ':(exclude).github')
+          prev=$(curl -sfL "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/source.sha" | tr -d '[:space:]' || true)
+          echo "source    $src"
+          echo "published ${prev:-<none>}"
+          echo "$src" > source.sha
+          if [ "$src" = "$prev" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "This source has already been built and released; nothing to do."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install NDK
-        if: github.event_name != 'schedule' || steps.sync.outputs.changed == 'true'
+        if: steps.src.outputs.changed == 'true'
         run: |
           "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${NDK_VERSION}" > /dev/null
           echo "NDK=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
 
       - name: Build
-        if: github.event_name != 'schedule' || steps.sync.outputs.changed == 'true'
+        if: steps.src.outputs.changed == 'true'
         run: |
           "$NDK/ndk-build" -C "libretro/jni" APP_ABI="$ABI" APP_PLATFORM="$PLATFORM"  -j"$(nproc)"
 
       - name: Collect
-        if: github.event_name != 'schedule' || steps.sync.outputs.changed == 'true'
+        if: steps.src.outputs.changed == 'true'
         run: |
           mkdir -p dist
           so="$(find . -path "*libs/$ABI/*.so" | head -1)"
@@ -103,14 +123,14 @@ jobs:
           ls -l dist
 
       - uses: actions/upload-artifact@v4
-        if: github.event_name != 'schedule' || steps.sync.outputs.changed == 'true'
+        if: steps.src.outputs.changed == 'true'
         with:
           name: libsnes9x_libretro_android.so
           path: dist/*.so
           if-no-files-found: error
 
       - name: Publish release
-        if: github.event_name != 'schedule' || steps.sync.outputs.changed == 'true'
+        if: steps.src.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -133,10 +153,10 @@ jobs:
           if ! gh release view "$tag" > /dev/null 2>&1; then
             gh release create "$tag" --title "$tag" --notes "arm64-v8a build from ${GITHUB_SHA}"
           fi
-          gh release upload "$tag" dist/*.so --clobber
+          gh release upload "$tag" dist/*.so source.sha --clobber
           if ! gh release view latest > /dev/null 2>&1; then
             gh release create latest --title latest --notes "Rolling build."
           fi
-          gh release upload latest dist/*.so --clobber
+          gh release upload latest dist/*.so source.sha --clobber
           gh release edit latest --notes "Rolling; newest immutable tag: $tag"
           echo "$tag"
