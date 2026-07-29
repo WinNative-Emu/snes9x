@@ -7,6 +7,10 @@ on:
   push:
     branches: [winnative]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -49,7 +53,6 @@ jobs:
           if ! git merge --no-edit "upstream/$branch"; then
             git merge --abort || git reset --hard "$before"
             echo "::warning::Upstream merge conflicts; $SYNC_BRANCH left untouched. Resolve by hand, then re-run."
-            git diff --name-only --diff-filter=U "$before" || true
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -59,12 +62,22 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "changed=true" >> "$GITHUB_OUTPUT"
           # Upstream trees can carry a nested submodule with no .gitmodules URL
           # (beetle-psx's deps/lightning/gnulib), which must not fail the sync.
-          git submodule update --init --recursive \
+          git submodule update --init --recursive \\
             || echo "::warning::submodule update incomplete"
-          git push origin "HEAD:$SYNC_BRANCH"
+          if ! git push origin "HEAD:$SYNC_BRANCH"; then
+            git fetch --no-tags origin "$SYNC_BRANCH"
+            if git merge --no-edit "origin/$SYNC_BRANCH" && git push origin "HEAD:$SYNC_BRANCH"; then
+              echo "Re-merged a concurrent update to $SYNC_BRANCH."
+            else
+              git merge --abort || true
+              echo "::warning::$SYNC_BRANCH moved during the run; skipping. The next run picks it up."
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "Merged $(git rev-list --count $before..$after) upstream commit(s)."
 
       - name: Install NDK
