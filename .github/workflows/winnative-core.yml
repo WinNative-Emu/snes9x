@@ -64,8 +64,7 @@ jobs:
           fi
           # Upstream trees can carry a nested submodule with no .gitmodules URL
           # (beetle-psx's deps/lightning/gnulib), which must not fail the sync.
-          git submodule update --init --recursive \\
-            || echo "::warning::submodule update incomplete"
+          git submodule update --init --recursive || echo "::warning::submodule update incomplete"
           if ! git push origin "HEAD:$SYNC_BRANCH"; then
             git fetch --no-tags origin "$SYNC_BRANCH"
             if git merge --no-edit "origin/$SYNC_BRANCH" && git push origin "HEAD:$SYNC_BRANCH"; then
