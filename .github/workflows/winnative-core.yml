@@ -88,7 +88,7 @@ jobs:
           # reproducibly, so comparing the built bytes cannot decide this on its
           # own -- an identical tree yields a different .so every time.
           src=$(git log -1 --format=%H -- . ':(exclude).github')
-          prev=$(curl -sfL "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/source.sha" | tr -d '[:space:]' || true)
+          prev=$(curl -sfL "https://github.com/${GITHUB_REPOSITORY}/releases/download/latest/source.sha" | tr -d '[:space:]' || true)
           echo "source    $src"
           echo "published ${prev:-<none>}"
           echo "$src" > source.sha
