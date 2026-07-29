@@ -46,7 +46,13 @@ jobs:
             git remote set-url upstream "https://github.com/$parent.git"
           git fetch --no-tags upstream "$branch"
           before=$(git rev-parse HEAD)
-          git merge --no-edit "upstream/$branch"
+          if ! git merge --no-edit "upstream/$branch"; then
+            git merge --abort || git reset --hard "$before"
+            echo "::warning::Upstream merge conflicts; $SYNC_BRANCH left untouched. Resolve by hand, then re-run."
+            git diff --name-only --diff-filter=U "$before" || true
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           after=$(git rev-parse HEAD)
           if [ "$before" = "$after" ]; then
             echo "Already up to date with upstream."
@@ -54,7 +60,10 @@ jobs:
             exit 0
           fi
           echo "changed=true" >> "$GITHUB_OUTPUT"
-          git submodule update --init --recursive
+          # Upstream trees can carry a nested submodule with no .gitmodules URL
+          # (beetle-psx's deps/lightning/gnulib), which must not fail the sync.
+          git submodule update --init --recursive \
+            || echo "::warning::submodule update incomplete"
           git push origin "HEAD:$SYNC_BRANCH"
           echo "Merged $(git rev-list --count $before..$after) upstream commit(s)."
 
