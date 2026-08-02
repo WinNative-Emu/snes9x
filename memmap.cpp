@@ -10,6 +10,7 @@
 #include <numeric>
 #include <assert.h>
 
+#include "snes9x.h"
 #ifdef UNZIP_SUPPORT
 #  ifdef SYSTEM_ZIP
 #    include <minizip/unzip.h>
@@ -25,15 +26,21 @@
 #include <ctype.h>
 #include <sys/stat.h>
 
-#include "snes9x.h"
 #include "memmap.h"
+#include "s9xbridge.h"
+
+uint8_t  *BridgeSRAM = 0;
+uint8_t  *BridgeROM = 0;
+uint8_t  *BridgeFillRAM = 0;
+uint8_t **BridgeMap = 0;
+uint32_t  BridgeSRAMMask = 0;
+uint32_t  BridgeCalculatedSize = 0;
 #include "apu/apu.h"
 #include "fxemu.h"
 #include "sdd1.h"
 #include "srtc.h"
 #include "controls.h"
 #include "cheats.h"
-#include "movie.h"
 #include "display.h"
 #include "sha256.h"
 #include "snapshot.h"
@@ -50,7 +57,6 @@
 #define min(a, b) (((a) < (b)) ? (a) : (b))
 #endif
 
-static bool8	stopMovie = TRUE;
 
 // from NSRT
 static const char	*nintendo_licensees[] =
@@ -965,11 +971,29 @@ bool8 CMemory::Init (void)
 	ROM = &ROMStorage[0x8000];
 
 	C4RAM   = ROM + 0x400000 + 8192 * 8; // C4
+	C4RAMBase = C4RAM;
+	C4ROMBase = ROM;
+	BridgeSRAM = SRAM;
+	BridgeROM = ROM;
+	BridgeFillRAM = FillRAM;
+	BridgeMap = Map;
 	OBC1RAM = ROM + 0x400000; // OBC1
+	OBC1RAMBase = OBC1RAM;
 	BIOSROM = ROM + 0x300000; // BS
 	BSRAM   = ROM + 0x400000; // BS
 
 	SuperFX.pvRegisters = FillRAM + 0x3000;
+	SPC7110Map = Map;
+	SPC7110ROM = ROM;
+	BSXMemMap      = Map;
+	BSXBlockIsRAM  = BlockIsRAM;
+	BSXBlockIsROM  = BlockIsROM;
+	BSXRAMBase     = RAM;
+	BSXSRAMBase    = SRAM;
+	BSXPSRAMBase   = BSRAM;
+	BSXBIOSROMBase = BIOSROM;
+	BSXROMBase     = ROM;
+	SFXFillRAM = FillRAM;
 	SuperFX.nRamBanks   = 2; // Most only use 1.  1=64KB=512Mb, 2=128KB=1024Mb
 	SuperFX.pvRam       = SRAM;
 	SuperFX.nRomBanks   = (2 * 1024 * 1024) / (32 * 1024);
@@ -1160,7 +1184,9 @@ int CMemory::ScoreLoROM (bool8 skip_header, int32 romoff)
 	if (CalculatedSize <= 1024 * 1024 * 16)
 		score += 2;
 
-	if ((1 << (buf[0xd7] - 7)) > 48)
+	/* buf[0xd7] < 7 claims a ROM smaller than 16KB: bogus header, penalize.
+	   Also avoids a negative shift count (UB, arch-dependent result). */
+	if (buf[0xd7] < 7 || (1 << (buf[0xd7] - 7)) > 48)
 		score -= 1;
 
 	if (!allASCII(&buf[0xb0], 6))
@@ -2060,11 +2086,12 @@ void CMemory::InitROM (void)
 	Settings.SPC7110RTC = FALSE;
 	Settings.OBC1 = FALSE;
 	Settings.SETA = 0;
-	Settings.SRTC = FALSE;
+	Settings.SRTC = FALSE, SRTCEnabled = 0;
 	Settings.BS = FALSE;
 	Settings.MSU1 = FALSE;
 
 	SuperFX.nRomBanks = CalculatedSize >> 15;
+	SPC7110ROMSize = CalculatedSize;
 
 	//// Parse ROM header and read ROM informatoin
 
@@ -2158,13 +2185,13 @@ void CMemory::InitROM (void)
 	{
 	    // SRTC
 		case 0x5535:
-			Settings.SRTC = TRUE;
+			Settings.SRTC = TRUE, SRTCEnabled = 1;
 			S9xInitSRTC();
 			break;
 
 		// SPC7110
 		case 0xF93A:
-			Settings.SPC7110RTC = TRUE;
+			Settings.SPC7110RTC = TRUE, SPC7110RTCEnabled = 1;
 			// Fall through
 		case 0xF53A:
 			Settings.SPC7110 = TRUE;
@@ -2344,9 +2371,9 @@ void CMemory::InitROM (void)
 
 	// NTSC/PAL
 	if (Settings.ForceNTSC)
-		Settings.PAL = FALSE;
+		Settings.PAL = FALSE, SuperFXPalFlag = 0, SRTCPalFlag = 0;
 	else if (Settings.ForcePAL)
-		Settings.PAL = TRUE;
+		Settings.PAL = TRUE, SuperFXPalFlag = 1, SRTCPalFlag = 1;
 	else if (!Settings.BS && (((ROMRegion >= 2) && (ROMRegion <= 12)) || ROMRegion == 18)) // 18 is used by "Tintin in Tibet (Europe) (En,Es,Sv)"
 		Settings.PAL = TRUE;
 	else
@@ -2377,6 +2404,8 @@ void CMemory::InitROM (void)
 
 	// SRAM size
 	SRAMMask = SRAMSize ? ((1 << (SRAMSize + 3)) * 128) - 1 : 0;
+	BridgeSRAMMask = SRAMMask;
+	BridgeCalculatedSize = CalculatedSize;
 
 	// checksum
 	if (!isChecksumOK || ((uint32) CalculatedSize > (uint32) (((1 << (ROMSize - 7)) * 128) * 1024)))
@@ -2457,11 +2486,6 @@ void CMemory::InitROM (void)
 	Settings.ForceNotInterleaved = FALSE;
 	Settings.ForcePAL = FALSE;
 	Settings.ForceNTSC = FALSE;
-
-	Settings.TakeScreenshot = FALSE;
-
-	if (stopMovie)
-		S9xMovieStop(TRUE);
 
 	if (PostRomInitFunc)
 		PostRomInitFunc();
@@ -2989,8 +3013,12 @@ void CMemory::Map_SA1LoROMMap (void)
 	map_index(0x00, 0x3f, 0x6000, 0x7fff, MAP_BWRAM, MAP_TYPE_I_O);
 	map_index(0x80, 0xbf, 0x6000, 0x7fff, MAP_BWRAM, MAP_TYPE_I_O);
 
+	// Route the S-CPU's linear BW-RAM banks through the MAP_SA1RAM
+	// handler instead of direct pointers, so reads can be intercepted by
+	// the CC1 character-conversion engine and writes honour the
+	// $2226-$2228 BW-RAM protection (both from snes9x2010, per ares).
 	for (int c = 0x40; c < 0x4f; c++)
-		map_space(c, c, 0x0000, 0xffff, SRAM + (c & 3) * 0x10000);
+		map_index(c, c, 0x0000, 0xffff, MAP_SA1RAM, MAP_TYPE_RAM);
 
 	map_WRAM();
 
@@ -3495,6 +3523,7 @@ void CMemory::ApplyROMFixes (void)
 	{
 		SRAMSize = 1;
 		SRAMMask = ((1 << (SRAMSize + 3)) * 128) - 1;
+		BridgeSRAMMask = SRAMMask;
 	}
 
 	// SRAM value fixes
@@ -3644,7 +3673,7 @@ static bool8 ReadUPSPatch (Stream *r, long, int32 &rom_size)
 	uint32 relative = 0;
 	while(addr < size - 12) {
 		relative += XPSdecode(data, addr, size);
-		while(addr < size - 12) {
+		while(addr < size - 12 && relative < CMemory::MAX_ROM_SIZE) {
 			uint8 x = data[addr++];
 			Memory.ROM[relative++] ^= x;
 			if(!x) break;
@@ -4008,6 +4037,7 @@ void CMemory::CheckForAnyPatch(const char *rom_filename, bool8 header, int32 &ro
 
             int close_ret = unzClose(file);
             assert(close_ret == UNZ_OK);
+            (void) close_ret;
 
             if (flag)
                 return;
@@ -4034,4 +4064,58 @@ void CMemory::CheckForAnyPatch(const char *rom_filename, bool8 header, int32 &ro
 
     if (try_patch_type_sequence(PATCH_DIR))
         return;
+}
+
+// ---- C bridges for bsx.c ----
+extern "C" void BSXMapWriteProtectROM (void)
+{
+	Memory.map_WriteProtectROM();
+}
+
+extern "C" void BSXSetLoHiROM (uint8_t lorom, uint8_t hirom)
+{
+	Memory.LoROM = lorom;
+	Memory.HiROM = hirom;
+}
+
+extern "C" uint8_t BSXGetSettingBS (void)          { return Settings.BS; }
+extern "C" void    BSXSetSettingBS (uint8_t on)    { Settings.BS = on; }
+extern "C" uint8_t BSXGetSettingBSXItself (void)   { return Settings.BSXItself; }
+extern "C" void    BSXSetSettingBSXItself (uint8_t on) { Settings.BSXItself = on; }
+extern "C" uint8_t BSXGetSettingBSXBootup (void)   { return Settings.BSXBootup; }
+
+extern "C" const char *BSXGetSatDirectory (void)
+{
+	static char buf[PATH_MAX + 1];
+	strncpy(buf, S9xGetDirectory(SAT_DIR).c_str(), PATH_MAX);
+	buf[PATH_MAX] = 0;
+	return buf;
+}
+
+extern "C" const char *BSXGetBIOSDirectory (void)
+{
+	static char buf[PATH_MAX + 1];
+	strncpy(buf, S9xGetDirectory(BIOS_DIR).c_str(), PATH_MAX);
+	buf[PATH_MAX] = 0;
+	return buf;
+}
+
+extern "C" const char *BSXGetSlashStr (void)
+{
+	return SLASH_STR;
+}
+
+extern "C" uint32_t BSXGetCalculatedSize (void)
+{
+	return Memory.CalculatedSize;
+}
+
+extern "C" uint32_t BSXGetCartOffsetB (void)
+{
+	return Multi.cartOffsetB;
+}
+
+extern "C" void BSXSetSRAMInitialValue (uint8_t v)
+{
+	SNESGameFixes.SRAMInitialValue = v;
 }

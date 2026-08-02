@@ -10,8 +10,10 @@
 #include "dma.h"
 #include "apu/apu.h"
 #include "fxemu.h"
+#include "srtc.h"
+#include "spc7110.h"
+#include "bsflash.h"
 #include "snapshot.h"
-#include "movie.h"
 #ifdef DEBUGGER
 #include "debug.h"
 #include "missing.h"
@@ -39,7 +41,6 @@ void S9xMainLoop (void)
 	if (CPU.Flags & SCAN_KEYS_FLAG)
 	{
 		CPU.Flags &= ~SCAN_KEYS_FLAG;
-		S9xMovieUpdate();
 	}
 
 	for (;;)
@@ -255,9 +256,19 @@ void S9xDoHEventProcessing (void)
 			break;
 
 		case HC_HCOUNTER_MAX_EVENT:
+			if (Settings.SRTC)
+				S9xSRTCTick();
+			if (Settings.SPC7110RTC)
+				S9xSPC7110RTCTick();
+			if (Settings.BS)
+				S9xBSFlashTick();
+
 			if (Settings.SuperFX)
 			{
-				if (!SuperFX.oneLineDone)
+				// The ported GSU core does not gate internally; run only
+				// with GO set and a bus grant, as the snes9x2010 call
+				// sites do (see CHECK_EXEC_SUPERFX).
+				if (!SuperFX.oneLineDone && CHECK_EXEC_SUPERFX())
 					S9xSuperFXExec();
 				SuperFX.oneLineDone = FALSE;
 			}

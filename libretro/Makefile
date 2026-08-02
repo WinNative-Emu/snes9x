@@ -645,6 +645,19 @@ endif
    endif
 endif
 
+# GCC 10+ parallelizes the LTRANS stage with -flto=auto, which also
+# silences the lto-wrapper "using serial compilation of N LTRANS jobs"
+# warning. Clang and older GCC reject the value, so probe the final
+# toolchain and keep plain -flto on failure. Only an unmodified
+# default is upgraded; LTO set on the command line is left alone.
+ifeq ($(LTO),-flto)
+   ifeq (,$(findstring cl.exe,$(CC)))
+      ifeq ($(shell printf 'int main(void){return 0;}' | $(CC) -flto=auto -x c - -o /dev/null 2>/dev/null && echo yes),yes)
+         LTO := -flto=auto
+      endif
+   endif
+endif
+
 include Makefile.common
 
 OBJECTS := $(SOURCES_CXX:.cpp=.o) $(SOURCES_C:.c=.o)
@@ -661,9 +674,9 @@ else
 endif
 
 CXXFLAGS	+= $(CODE_DEFINES) $(WARNINGS_DEFINES) $(fpic)
-CXXFLAGS	+= -DRIGHTSHIFT_IS_SAR -D__LIBRETRO__ -DALLOW_CPU_OVERCLOCK
+CXXFLAGS	+= -D__LIBRETRO__ -DALLOW_CPU_OVERCLOCK
 CFLAGS		+= $(CODE_DEFINES) $(WARNINGS_DEFINES) $(fpic)
-CFLAGS		+= -DRIGHTSHIFT_IS_SAR -D__LIBRETRO__ -DALLOW_CPU_OVERCLOCK
+CFLAGS		+= -D__LIBRETRO__ -DALLOW_CPU_OVERCLOCK
 CFLAGS          += -DHAVE_STDINT_H
 CXXFLAGS        += -DHAVE_STDINT_H
 ifeq (,$(findstring msvc,$(platform)))

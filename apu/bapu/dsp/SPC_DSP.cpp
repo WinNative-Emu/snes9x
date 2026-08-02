@@ -864,13 +864,10 @@ inline void SPC_DSP::voice_output( voice_t const* v, int ch )
 	int amp = (m.t_output * (int8_t) VREG(v->regs,voll + ch)) >> 7;
 	amp *= ((stereo_switch & (1 << (v->voice_number + ch * voice_count))) ? 1 : 0);
 	
-	#ifdef __LIBRETRO__
 	// Apply user-set volume (if set)
+	// 16384 / 100 is approx 163.84.
 	if (Settings.ChannelsVolumePercent[v->voice_number] < 100)
-	{
-	    amp = amp * Settings.ChannelsVolumePercent[v->voice_number] / 100;
-	}
-	#endif
+		amp = (amp * Settings.ChannelsVolumePercent[v->voice_number] * 164) >> 14;
 	
 	// Add to output total
 	m.t_main_out [ch] += amp;
@@ -1253,6 +1250,8 @@ void SPC_DSP::load( uint8_t const regs [register_count] )
 {
 	memcpy( m.external_regs, regs, sizeof m.regs );
 	memset( m.regs, 0, sizeof m.regs);
+	m.regs[66] = 0x01;
+	m.regs[82] = 0x01;
 	m.regs[r_flg] = 0xE0;
 	memset( &m.regs [register_count], 0, offsetof (state_t,ram) - register_count );
 

@@ -2,6 +2,7 @@
 #include "libretro_core_options.h"
 
 #include "snes9x.h"
+#include "fxemu.h"
 #include "memmap.h"
 #include "srtc.h"
 #include "apu/apu.h"
@@ -10,7 +11,6 @@
 #include "snapshot.h"
 #include "controls.h"
 #include "cheats.h"
-#include "movie.h"
 #include "display.h"
 #include "conffile.h"
 #include "crosshairs.h"
@@ -27,6 +27,8 @@
 #include <sys/types.h>
 #include <fcntl.h>
 #include "filter/snes_ntsc.h"
+
+static void reset_button_cache(void);
 
 #define RETRO_DEVICE_JOYPAD_MULTITAP ((1 << 8) | RETRO_DEVICE_JOYPAD)
 #define RETRO_DEVICE_LIGHTGUN_SUPER_SCOPE ((1 << 8) | RETRO_DEVICE_LIGHTGUN)
@@ -337,8 +339,23 @@ void update_geometry(void)
     g_geometry_update = false;
 }
 
+static bool setting_turbo_buttons = false;
+static bool turbo_buttons_mapped   = false;
+static void map_turbo_buttons(void);
+
 static void update_variables(void)
 {
+    {
+        struct retro_variable tvar = { "snes9x_turbo_buttons", NULL };
+        bool want = false;
+        if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &tvar) && tvar.value)
+            want = !strcmp(tvar.value, "enabled");
+        if (want != setting_turbo_buttons)
+        {
+            setting_turbo_buttons = want;
+            map_turbo_buttons();
+        }
+    }
     char key[256];
     struct retro_variable var;
 
@@ -361,6 +378,7 @@ static void update_variables(void)
     {
         int freq = atoi(var.value);
         Settings.SuperFXClockMultiplier = freq;
+        SuperFXSpeedPerLineHz = (uint32) ((uint64) 4378500 * freq / 100);
     }
 
     var.key = "snes9x_up_down_allowed";
@@ -894,12 +912,14 @@ unsigned retro_api_version()
 
 void retro_reset()
 {
+    reset_button_cache();
     S9xSoftReset();
 }
 
 static unsigned snes_devices[8];
 void retro_set_controller_port_device(unsigned port, unsigned device)
 {
+    reset_button_cache();
     if (port < 8)
     {
         int offset = snes_devices[0] == RETRO_DEVICE_JOYPAD_MULTITAP ? 4 : 1;
@@ -1014,7 +1034,11 @@ static void init_descriptors(void)
         { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R,		"R" },
         { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT,	"Select" },
         { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,		"Start" },
-
+        { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2,		"Turbo B" },
+        { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2,		"Turbo A" },
+        { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3,		"Turbo Y" },
+        { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3,		"Turbo X" },
+    
         { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,  "D-Pad Left" },
         { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,		"D-Pad Up" },
         { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,  "D-Pad Down" },
@@ -1027,6 +1051,10 @@ static void init_descriptors(void)
         { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R,		"R" },
         { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT,	"Select" },
         { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,		"Start" },
+        { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2,		"Turbo B" },
+        { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2,		"Turbo A" },
+        { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3,		"Turbo Y" },
+        { 1, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3,		"Turbo X" },
 
         { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,  "D-Pad Left" },
         { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,		"D-Pad Up" },
@@ -1040,6 +1068,10 @@ static void init_descriptors(void)
         { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R,		"R" },
         { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT,	"Select" },
         { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,		"Start" },
+        { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2,		"Turbo B" },
+        { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2,		"Turbo A" },
+        { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3,		"Turbo Y" },
+        { 2, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3,		"Turbo X" },
 
         { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,  "D-Pad Left" },
         { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,		"D-Pad Up" },
@@ -1053,6 +1085,10 @@ static void init_descriptors(void)
         { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R,		"R" },
         { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT,	"Select" },
         { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,		"Start" },
+        { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2,		"Turbo B" },
+        { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2,		"Turbo A" },
+        { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3,		"Turbo Y" },
+        { 3, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3,		"Turbo X" },
 
         { 4, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,  "D-Pad Left" },
         { 4, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,		"D-Pad Up" },
@@ -1066,7 +1102,11 @@ static void init_descriptors(void)
         { 4, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R,		"R" },
         { 4, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT,	"Select" },
         { 4, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,		"Start" },
-	    
+        { 4, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2,		"Turbo B" },
+        { 4, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2,		"Turbo A" },
+        { 4, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3,		"Turbo Y" },
+        { 4, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3,		"Turbo X" },
+
         { 5, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,  "D-Pad Left" },
         { 5, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,		"D-Pad Up" },
         { 5, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,  "D-Pad Down" },
@@ -1079,7 +1119,11 @@ static void init_descriptors(void)
         { 5, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R,		"R" },
         { 5, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT,	"Select" },
         { 5, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,		"Start" },
-	    
+        { 5, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2,		"Turbo B" },
+        { 5, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2,		"Turbo A" },
+        { 5, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3,		"Turbo Y" },
+        { 5, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3,		"Turbo X" },
+        
         { 6, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,  "D-Pad Left" },
         { 6, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,		"D-Pad Up" },
         { 6, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_DOWN,  "D-Pad Down" },
@@ -1092,6 +1136,10 @@ static void init_descriptors(void)
         { 6, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R,		"R" },
         { 6, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT,	"Select" },
         { 6, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,		"Start" },
+        { 6, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2,		"Turbo B" },
+        { 6, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2,		"Turbo A" },
+        { 6, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3,		"Turbo Y" },
+        { 6, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3,		"Turbo X" },
 
         { 7, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT,  "D-Pad Left" },
         { 7, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP,		"D-Pad Up" },
@@ -1105,6 +1153,10 @@ static void init_descriptors(void)
         { 7, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R,		"R" },
         { 7, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_SELECT,	"Select" },
         { 7, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_START,		"Start" },
+        { 7, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2,		"Turbo B" },
+        { 7, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2,		"Turbo A" },
+        { 7, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L3,		"Turbo Y" },
+        { 7, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3,		"Turbo X" },
 	    
         { 0, 0, 0, 0, NULL },
     };
@@ -1233,7 +1285,7 @@ bool retro_load_game(const struct retro_game_info *game)
         if (randomize_memory)
         {
             srand(time(NULL));
-            for(int lcv = 0; lcv < sizeof(Memory.RAM); lcv++)
+            for(size_t lcv = 0; lcv < sizeof(Memory.RAM); lcv++)
                 Memory.RAM[lcv] = rand() % 256;
         }
     }
@@ -1486,6 +1538,32 @@ void retro_init(void)
 #define MAP_BUTTON(id, name) S9xMapButton((id), S9xGetCommandT((name)), false)
 #define MAKE_BUTTON(pad, btn) (((pad)<<4)|(btn))
 
+/* Report input edges only. S9xReportButton applies non-command mappings
+   unconditionally, and this port re-reports every button every frame; the
+   per-frame release report of an unheld button then clears the very bit
+   that S9xControlEOF's "buttons ^= turbos" turbo toggle set, so turbo
+   pulses are suppressed before every auto-joypad read. (This was latent
+   for as long as the pointer-ID collision kept pad 1's B/Y mappings dead;
+   fixing the collision exposed it.) The standalone ports never see this
+   because they only report key events -- do the same. */
+static uint8 button_state_cache[MAKE_BUTTON(8 + 1, 0) + 16];
+
+static void reset_button_cache(void)
+{
+    memset(button_state_cache, 0, sizeof(button_state_cache));
+}
+
+static void report_button(uint32 id, bool pressed)
+{
+    if (id < sizeof(button_state_cache))
+    {
+        if (button_state_cache[id] == (uint8) pressed)
+            return;
+        button_state_cache[id] = (uint8) pressed;
+    }
+    S9xReportButton(id, pressed);
+}
+
 #define PAD_1 1
 #define PAD_2 2
 #define PAD_3 3
@@ -1507,8 +1585,12 @@ void retro_init(void)
 #define BTN_X RETRO_DEVICE_ID_JOYPAD_X
 #define BTN_L RETRO_DEVICE_ID_JOYPAD_L
 #define BTN_R RETRO_DEVICE_ID_JOYPAD_R
+#define BTN_L2 RETRO_DEVICE_ID_JOYPAD_L2
+#define BTN_R2 RETRO_DEVICE_ID_JOYPAD_R2
+#define BTN_L3 RETRO_DEVICE_ID_JOYPAD_L3
+#define BTN_R3 RETRO_DEVICE_ID_JOYPAD_R3
 #define BTN_FIRST BTN_B
-#define BTN_LAST BTN_R
+#define BTN_LAST BTN_R3
 
 #define MOUSE_X RETRO_DEVICE_ID_MOUSE_X
 #define MOUSE_Y RETRO_DEVICE_ID_MOUSE_Y
@@ -1538,12 +1620,61 @@ static int scope_button_count = sizeof( scope_buttons ) / sizeof( int );
 
 #define MACS_RIFLE_TRIGGER 2
 
-#define BTN_POINTER (BTN_LAST + 1)
+/* Pointer IDs must live outside the MAKE_BUTTON space: MAKE_BUTTON packs
+   the button into 4 bits, so pads 1-8 occupy IDs 0x10-0x8F. When the
+   turbo buttons extended BTN_LAST from BTN_R (11) to BTN_R3 (15),
+   BTN_LAST + 1 = 16 = MAKE_BUTTON(PAD_1, BTN_B): S9xMapPointer then
+   overwrote the Joypad1 B and Y button mappings with the two pointer
+   mappings ("Remapping ID 0x00000010/0x00000011 from button to pointer"
+   at startup), leaving pad 1's B and Y dead in every game. */
+#define BTN_POINTER (MAKE_BUTTON(PAD_8, BTN_LAST) + 1)
 #define BTN_POINTER2 (BTN_POINTER + 1)
 
 
+/* L2/R2/L3/R3 turbo mappings, gated by the snes9x_turbo_buttons core
+   option. They were previously hardwired, which made accidental analog
+   trigger presses and stick clicks engage rapid-fire with no way to turn
+   it off: hold-sensitive games (Mega Man X2 charge shots, jump height,
+   dashing) then appear to have broken controls. */
+static void map_turbo_buttons(void)
+{
+    static const int  btns[4]  = { BTN_L2, BTN_R2, BTN_L3, BTN_R3 };
+    static const char *cmds[4] = { "Turbo B", "Turbo A", "Turbo Y", "Turbo X" };
+    char name[32];
+    int pad, b;
+
+    if (setting_turbo_buttons == turbo_buttons_mapped)
+        return;
+
+    for (pad = 1; pad <= 8; pad++)
+    {
+        for (b = 0; b < 4; b++)
+        {
+            uint32 id = MAKE_BUTTON(pad, btns[b]);
+            /* Release through the old mapping first so an engaged turbo
+               bit cannot stick when the mapping goes away. */
+            if (turbo_buttons_mapped)
+                S9xReportButton(id, false);
+            if (setting_turbo_buttons)
+            {
+                snprintf(name, sizeof(name), "Joypad%d %s", pad, cmds[b]);
+                S9xMapButton(id, S9xGetCommandT(name), false);
+            }
+            else
+                S9xMapButton(id, S9xGetCommandT("None"), false);
+        }
+    }
+
+    turbo_buttons_mapped = setting_turbo_buttons;
+}
+
 static void map_buttons()
 {
+    reset_button_cache();
+    /* Fresh keymap: force map_turbo_buttons to (re)apply the current
+       option state. */
+    turbo_buttons_mapped = !setting_turbo_buttons;
+    map_turbo_buttons();
     MAP_BUTTON(MAKE_BUTTON(PAD_1, BTN_A), "Joypad1 A");
     MAP_BUTTON(MAKE_BUTTON(PAD_1, BTN_B), "Joypad1 B");
     MAP_BUTTON(MAKE_BUTTON(PAD_1, BTN_X), "Joypad1 X");
@@ -1610,7 +1741,7 @@ static void map_buttons()
     MAP_BUTTON(MAKE_BUTTON(PAD_5, BTN_RIGHT), "Joypad5 Right");
     MAP_BUTTON(MAKE_BUTTON(PAD_5, BTN_UP), "Joypad5 Up");
     MAP_BUTTON(MAKE_BUTTON(PAD_5, BTN_DOWN), "Joypad5 Down");
-
+    
     MAP_BUTTON(MAKE_BUTTON(PAD_6, BTN_A), "Joypad6 A");
     MAP_BUTTON(MAKE_BUTTON(PAD_6, BTN_B), "Joypad6 B");
     MAP_BUTTON(MAKE_BUTTON(PAD_6, BTN_X), "Joypad6 X");
@@ -1623,7 +1754,7 @@ static void map_buttons()
     MAP_BUTTON(MAKE_BUTTON(PAD_6, BTN_RIGHT), "Joypad6 Right");
     MAP_BUTTON(MAKE_BUTTON(PAD_6, BTN_UP), "Joypad6 Up");
     MAP_BUTTON(MAKE_BUTTON(PAD_6, BTN_DOWN), "Joypad6 Down");
-	
+    
     MAP_BUTTON(MAKE_BUTTON(PAD_7, BTN_A), "Joypad7 A");
     MAP_BUTTON(MAKE_BUTTON(PAD_7, BTN_B), "Joypad7 B");
     MAP_BUTTON(MAKE_BUTTON(PAD_7, BTN_X), "Joypad7 X");
@@ -1636,7 +1767,7 @@ static void map_buttons()
     MAP_BUTTON(MAKE_BUTTON(PAD_7, BTN_RIGHT), "Joypad7 Right");
     MAP_BUTTON(MAKE_BUTTON(PAD_7, BTN_UP), "Joypad7 Up");
     MAP_BUTTON(MAKE_BUTTON(PAD_7, BTN_DOWN), "Joypad7 Down");
-	
+
     MAP_BUTTON(MAKE_BUTTON(PAD_8, BTN_A), "Joypad8 A");
     MAP_BUTTON(MAKE_BUTTON(PAD_8, BTN_B), "Joypad8 B");
     MAP_BUTTON(MAKE_BUTTON(PAD_8, BTN_X), "Joypad8 X");
@@ -1723,13 +1854,13 @@ static void input_handle_pointer_lightgun( unsigned port, unsigned gun_device, i
         switch (gun_device)
         {
         case RETRO_DEVICE_LIGHTGUN_SUPER_SCOPE:
-            S9xReportButton(MAKE_BUTTON(PAD_2, setting_superscope_reverse_buttons ? SUPER_SCOPE_CURSOR : SUPER_SCOPE_TRIGGER), false);
+            report_button(MAKE_BUTTON(PAD_2, setting_superscope_reverse_buttons ? SUPER_SCOPE_CURSOR : SUPER_SCOPE_TRIGGER), false);
             break;
         case RETRO_DEVICE_LIGHTGUN_JUSTIFIER:
-            S9xReportButton(MAKE_BUTTON(PAD_2, JUSTIFIER_TRIGGER), false);
+            report_button(MAKE_BUTTON(PAD_2, JUSTIFIER_TRIGGER), false);
             break;
         case RETRO_DEVICE_LIGHTGUN_MACS_RIFLE:
-            S9xReportButton(MAKE_BUTTON(PAD_2, MACS_RIFLE_TRIGGER), false);
+            report_button(MAKE_BUTTON(PAD_2, MACS_RIFLE_TRIGGER), false);
             break;
         default:
             break;
@@ -1772,13 +1903,13 @@ static void input_handle_pointer_lightgun( unsigned port, unsigned gun_device, i
                     }
                 }
             }
-            S9xReportButton(MAKE_BUTTON(PAD_2, SUPER_SCOPE_START), start_pressed);
-            S9xReportButton(MAKE_BUTTON(PAD_2, SUPER_SCOPE_TRIGGER), trigger_pressed);
-            S9xReportButton(MAKE_BUTTON(PAD_2, SUPER_SCOPE_CURSOR), cursor_pressed);
+            report_button(MAKE_BUTTON(PAD_2, SUPER_SCOPE_START), start_pressed);
+            report_button(MAKE_BUTTON(PAD_2, SUPER_SCOPE_TRIGGER), trigger_pressed);
+            report_button(MAKE_BUTTON(PAD_2, SUPER_SCOPE_CURSOR), cursor_pressed);
             bool old_turbo = turbo_pressed;
             turbo_pressed = turbo_pressed && !snes_superscope_turbo_latch;
             snes_superscope_turbo_latch = old_turbo;
-            S9xReportButton(MAKE_BUTTON(PAD_2, SUPER_SCOPE_TURBO), turbo_pressed);
+            report_button(MAKE_BUTTON(PAD_2, SUPER_SCOPE_TURBO), turbo_pressed);
             break;
         }
 
@@ -1797,15 +1928,15 @@ static void input_handle_pointer_lightgun( unsigned port, unsigned gun_device, i
                     trigger_pressed = true;
                 }
             }
-            S9xReportButton(MAKE_BUTTON(PAD_2, JUSTIFIER_TRIGGER), trigger_pressed || offscreen);
-            S9xReportButton(MAKE_BUTTON(PAD_2, JUSTIFIER_START), start_pressed ? 1 : 0 );
-            S9xReportButton(MAKE_BUTTON(PAD_2, JUSTIFIER_OFFSCREEN), offscreen);
+            report_button(MAKE_BUTTON(PAD_2, JUSTIFIER_TRIGGER), trigger_pressed || offscreen);
+            report_button(MAKE_BUTTON(PAD_2, JUSTIFIER_START), start_pressed ? 1 : 0 );
+            report_button(MAKE_BUTTON(PAD_2, JUSTIFIER_OFFSCREEN), offscreen);
             break;
         }
         case RETRO_DEVICE_LIGHTGUN_MACS_RIFLE:
         {
             int pressed = input_state_cb(port, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_PRESSED);
-            S9xReportButton(MAKE_BUTTON(PAD_2, MACS_RIFLE_TRIGGER),pressed);
+            report_button(MAKE_BUTTON(PAD_2, MACS_RIFLE_TRIGGER),pressed);
             break;
         }
         case RETRO_DEVICE_NONE:
@@ -1837,7 +1968,7 @@ static void report_buttons()
                 }
 
                 for (int i = BTN_FIRST; i <= BTN_LAST; i++)
-                    S9xReportButton(MAKE_BUTTON(port * offset + 1, i), joy_bits & (1 << i));
+                    report_button(MAKE_BUTTON(port * offset + 1, i), joy_bits & (1 << i));
                 break;
 
             case RETRO_DEVICE_JOYPAD_MULTITAP:
@@ -1853,7 +1984,7 @@ static void report_buttons()
                     }
 
                     for (int i = BTN_FIRST; i <= BTN_LAST; i++)
-                        S9xReportButton(MAKE_BUTTON(port * offset + j + 1, i), joy_bits & (1 << i));
+                        report_button(MAKE_BUTTON(port * offset + j + 1, i), joy_bits & (1 << i));
 				}
                 break;
 
@@ -1864,7 +1995,7 @@ static void report_buttons()
                 snes_mouse_state[port][1] += _y;
                 S9xReportPointer(BTN_POINTER + port, snes_mouse_state[port][0], snes_mouse_state[port][1]);
                 for (int i = MOUSE_LEFT; i <= MOUSE_LAST; i++)
-                    S9xReportButton(MAKE_BUTTON(port + 1, i), input_state_cb(port, RETRO_DEVICE_MOUSE, 0, i));
+                    report_button(MAKE_BUTTON(port + 1, i), input_state_cb(port, RETRO_DEVICE_MOUSE, 0, i));
                 break;
 
             case RETRO_DEVICE_LIGHTGUN_SUPER_SCOPE:
@@ -1896,7 +2027,7 @@ static void report_buttons()
                                 super_scope_button_id = SUPER_SCOPE_TRIGGER;
                             }
                         }
-                        S9xReportButton(MAKE_BUTTON(PAD_2, super_scope_button_id), btn);
+                        report_button(MAKE_BUTTON(PAD_2, super_scope_button_id), btn);
                     }
                 }
                 break;
@@ -1915,15 +2046,15 @@ static void report_buttons()
 
                         /* Trigger ? */
                         int btn_trigger = input_state_cb( port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_TRIGGER );
-                        S9xReportButton(MAKE_BUTTON(PAD_2, JUSTIFIER_TRIGGER), btn_trigger || btn_offscreen_shot);
+                        report_button(MAKE_BUTTON(PAD_2, JUSTIFIER_TRIGGER), btn_trigger || btn_offscreen_shot);
 
                         /* Start Button ? */
                         int btn_start = input_state_cb( port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_START );
-                        S9xReportButton(MAKE_BUTTON(PAD_2, JUSTIFIER_START), btn_start ? 1 : 0 );
+                        report_button(MAKE_BUTTON(PAD_2, JUSTIFIER_START), btn_start ? 1 : 0 );
 
                         /* Aiming off-screen ? */
                         int btn_offscreen = input_state_cb( port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_IS_OFFSCREEN );
-                        S9xReportButton(MAKE_BUTTON(PAD_2, JUSTIFIER_OFFSCREEN), btn_offscreen || btn_offscreen_shot);
+                        report_button(MAKE_BUTTON(PAD_2, JUSTIFIER_OFFSCREEN), btn_offscreen || btn_offscreen_shot);
                     }
 
                     /* Second Gun? */
@@ -1938,15 +2069,15 @@ static void report_buttons()
 
                         /* Trigger ? */
                         int btn_trigger = input_state_cb( second, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_TRIGGER );
-                        S9xReportButton(MAKE_BUTTON(PAD_3, JUSTIFIER_TRIGGER), btn_trigger || btn_offscreen_shot);
+                        report_button(MAKE_BUTTON(PAD_3, JUSTIFIER_TRIGGER), btn_trigger || btn_offscreen_shot);
 
                         /* Start Button ? */
                         int btn_start = input_state_cb( second, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_START );
-                        S9xReportButton(MAKE_BUTTON(PAD_3, JUSTIFIER_START), btn_start ? 1 : 0 );
+                        report_button(MAKE_BUTTON(PAD_3, JUSTIFIER_START), btn_start ? 1 : 0 );
 
                         /* Aiming off-screen ? */
                         int btn_offscreen = input_state_cb( second, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_IS_OFFSCREEN );
-                        S9xReportButton(MAKE_BUTTON(PAD_3, JUSTIFIER_OFFSCREEN), btn_offscreen || btn_offscreen_shot);
+                        report_button(MAKE_BUTTON(PAD_3, JUSTIFIER_OFFSCREEN), btn_offscreen || btn_offscreen_shot);
                     }
                 }
                 break;
@@ -1961,7 +2092,7 @@ static void report_buttons()
                     {
                         /* Trigger ? */
                         int btn_trigger = input_state_cb( port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_TRIGGER );
-                        S9xReportButton(MAKE_BUTTON(PAD_2, MACS_RIFLE_TRIGGER), btn_trigger);
+                        report_button(MAKE_BUTTON(PAD_2, MACS_RIFLE_TRIGGER), btn_trigger);
                     }
                 }
                 break;
@@ -2046,14 +2177,14 @@ void* retro_get_memory_data(unsigned type)
             data = RTCData.reg;
             break;
         case RETRO_MEMORY_SYSTEM_RAM:
-        data = Memory.RAM;
-        break;
+            data = Memory.RAM;
+            break;
         case RETRO_MEMORY_VIDEO_RAM:
-        data = Memory.VRAM;
-        break;
-        //case RETRO_MEMORY_ROM:
-        //	data = Memory.ROM;
-        //	break;
+            data = Memory.VRAM;
+            break;
+        case RETRO_MEMORY_ROM:
+            data = Memory.ROM;
+            break;
         default:
             data = NULL;
             break;
@@ -2085,9 +2216,9 @@ size_t retro_get_memory_size(unsigned type)
         case RETRO_MEMORY_VIDEO_RAM:
             size = 64 * 1024;
             break;
-        //case RETRO_MEMORY_ROM:
-        //	size = Memory.CalculatedSize;
-        //	break;
+        case RETRO_MEMORY_ROM:
+            size = Memory.CalculatedSize;
+            break;
         default:
             size = 0;
             break;
@@ -2118,6 +2249,7 @@ bool retro_serialize(void *data, size_t size)
 
 bool retro_unserialize(const void* data, size_t size)
 {
+    reset_button_cache();
     int result = -1;
     bool okay = false;
     okay = environ_cb(RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE, &result);
