@@ -120,6 +120,14 @@ jobs:
             exit 1
           fi
           cp "$so" "dist/libsnes9x_libretro_android.so"
+          for so in dist/*.so; do
+            for a in $(readelf -lW "$so" | awk '/LOAD/ {print $NF}' | sort -u); do
+              if [ "$(printf '%d' "$a")" -lt 16384 ]; then
+                echo "$so has a $a-aligned LOAD segment and will not load on 16 KB page devices" >&2
+                exit 1
+              fi
+            done
+          done
           ls -l dist
 
       - uses: actions/upload-artifact@v4
