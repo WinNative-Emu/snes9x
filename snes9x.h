@@ -245,16 +245,13 @@ struct SSettings
 	int32	InterpolationMethod;
 
 	bool8	Transparency;
+	int32	Mode7Hires;				// 0 off, 2 = 2x, 4 = 4x Mode 7 hires
+	int32	Mode7HiresVertical;		// 2x vertical resample post-pass
+	int32	Mode7HiresBilinear;		// 0 nearest, 1 stable, 2 smooth
 	uint8	BG_Forced;
 	bool8	DisableGraphicWindows;
 	uint16  ForcedBackdrop;
 
-	bool8	DisplayTime;
-	bool8	DisplayFrameRate;
-	bool8	DisplayWatchedAddresses;
-	bool8	DisplayPressedKeys;
-	bool	DisplayIndicators;
-	bool8	AutoDisplayMessages;
 	uint32	InitialInfoStringTimeout;
 	uint16	DisplayColor;
 	bool8	BilinearFilter;
@@ -285,7 +282,6 @@ struct SSettings
 	bool8	DumpStreams;
 	int		DumpStreamsMaxFrames;
 
-	bool8	SnapshotScreenshots;
 	char    InitialSnapshotFilename[PATH_MAX + 1];
 	bool8	FastSavestates;
 

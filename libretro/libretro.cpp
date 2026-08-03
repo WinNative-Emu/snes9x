@@ -2,6 +2,7 @@
 #include "libretro_core_options.h"
 
 #include "snes9x.h"
+extern "C" { extern uint8 TileMode7Hires; extern uint8 TileMode7HiresBilinear; }
 #include "fxemu.h"
 #include "memmap.h"
 #include "srtc.h"
@@ -87,6 +88,9 @@ const int MAX_SNES_WIDTH_NTSC = ((SNES_NTSC_OUT_WIDTH(256) + 3) / 4) * 4;
 
 static bool show_lightgun_settings = true;
 static bool show_advanced_av_settings = true;
+/* snes9x_msu1_enhanced_audio core option; latched into the playback rate at
+   content load by msu1_update_playback_rate(). */
+static bool msu1_enhanced_pref = true;
 
 static void extract_basename(char *buf, const char *path, size_t size)
 {
@@ -358,6 +362,63 @@ static void update_variables(void)
     }
     char key[256];
     struct retro_variable var;
+
+    var.key = "snes9x_msu1_enhanced_audio";
+    var.value = NULL;
+
+    msu1_enhanced_pref = true;
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+        msu1_enhanced_pref = !strcmp(var.value, "enabled");
+
+    var.key = "snes9x_mode7_hires";
+    var.value = NULL;
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+    {
+        int prev = Settings.Mode7Hires;
+        if (strcmp(var.value, "4x_hv") == 0)
+        {
+            Settings.Mode7Hires = 4;
+            Settings.Mode7HiresVertical = 1;
+        }
+        else if (strcmp(var.value, "2x_hv") == 0)
+        {
+            Settings.Mode7Hires = 2;
+            Settings.Mode7HiresVertical = 1;
+        }
+        else if (strcmp(var.value, "4x") == 0)
+        {
+            Settings.Mode7Hires = 4;
+            Settings.Mode7HiresVertical = 0;
+        }
+        else if (strcmp(var.value, "2x") == 0)
+        {
+            Settings.Mode7Hires = 2;
+            Settings.Mode7HiresVertical = 0;
+        }
+        else
+        {
+            Settings.Mode7Hires = 0;
+            Settings.Mode7HiresVertical = 0;
+        }
+        TileMode7Hires = (uint8) Settings.Mode7Hires;
+        /* Live option switch: refresh frontend geometry (max/base sizes,
+           aspect) the same way the aspect option does. */
+        if (prev != Settings.Mode7Hires)
+            g_geometry_update = true;
+    }
+
+    var.key = "snes9x_mode7_hires_bilinear";
+    var.value = NULL;
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+    {
+        if (strcmp(var.value, "smooth") == 0)
+            Settings.Mode7HiresBilinear = 2;
+        else if (strcmp(var.value, "stable") == 0)
+            Settings.Mode7HiresBilinear = 1;
+        else
+            Settings.Mode7HiresBilinear = 0;
+        TileMode7HiresBilinear = (uint8) Settings.Mode7HiresBilinear;
+    }
 
     var.key = "snes9x_hires_blend";
     var.value = NULL;
@@ -894,10 +955,11 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
 
     info->geometry.base_width = width;
     info->geometry.base_height = height;
-    info->geometry.max_width = MAX_SNES_WIDTH_NTSC;
+    info->geometry.max_width = MAX_SNES_WIDTH_NTSC > MAX_SNES_WIDTH_4X
+                                   ? MAX_SNES_WIDTH_NTSC : MAX_SNES_WIDTH_4X;
     info->geometry.max_height = MAX_SNES_HEIGHT;
     info->geometry.aspect_ratio = get_aspect_ratio(width, height);
-    info->timing.sample_rate = 32040;
+    info->timing.sample_rate = Settings.SoundPlaybackRate;
     info->timing.fps = retro_get_region() == RETRO_REGION_NTSC ? 21477272.0 / 357366.0 : 21281370.0 / 425568.0;
 
     g_screen_gun_width = width;
@@ -1233,6 +1295,26 @@ static bool8 is_SufamiTurbo_Cart (const uint8 *data, uint32 size)
         return (FALSE);
 }
 
+/* MSU-1 tracks are 44.1 kHz PCM. At the default 32040 Hz playback rate the
+   MSU resampler runs at ratio 44100/32040 = 1.376 -- a decimation through a
+   hermite interpolator with no anti-alias filtering, folding all
+   16.02-22.05 kHz track content down into the 10-16 kHz band as audible
+   hiss (libretro/snes9x#309; standalone builds don't exhibit it because
+   they default to 48 kHz playback). Raise the pipeline to 44.1 kHz for
+   MSU-1 content: the MSU ratio becomes exactly 1.0 (the resampler's
+   bit-exact pull path) and the SPC side becomes a clean upsample.
+   Non-MSU-1 content keeps the historical 32040 Hz output, as does MSU-1
+   content when the core option is disabled. */
+static void msu1_update_playback_rate(void)
+{
+    int playback_rate = (Settings.MSU1 && msu1_enhanced_pref) ? 44100 : 32040;
+    if (Settings.SoundPlaybackRate != playback_rate)
+    {
+        Settings.SoundPlaybackRate = playback_rate;
+        S9xInitSound(32);
+    }
+}
+
 bool retro_load_game(const struct retro_game_info *game)
 {
     init_descriptors();
@@ -1292,6 +1374,8 @@ bool retro_load_game(const struct retro_game_info *game)
 
     if (!rom_loaded && log_cb)
         log_cb(RETRO_LOG_ERROR, "ROM loading failed...\n");
+
+    msu1_update_playback_rate();
 
     Memory.ClearSRAM();
 
@@ -1427,6 +1511,8 @@ bool retro_load_game_special(unsigned game_type, const struct retro_game_info *i
         g_geometry_update = true;
     }
 
+    msu1_update_playback_rate();
+
     return rom_loaded;
 }
 
@@ -1480,7 +1566,6 @@ void retro_init(void)
     Settings.SoundPlaybackRate = 32040;
     Settings.SoundInputRate = 32040;
     Settings.Transparency = TRUE;
-    Settings.AutoDisplayMessages = TRUE;
     Settings.InitialInfoStringTimeout = 120;
     Settings.HDMATimingHack = 100;
     Settings.BlockInvalidVRAMAccessMaster = TRUE;
@@ -2339,6 +2424,31 @@ bool8 S9xDeinitUpdate(int width, int height)
     if (blargg_filter)
     {
         burst_phase = (burst_phase + 1) % 3;
+
+        if (width > 512)
+        {
+            /* HD Mode 7 4x frame. The NTSC filter models a composite
+               signal whose output tops out at SNES_NTSC_OUT_WIDTH(256)
+               = 602 px, so input columns beyond 512 add no information
+               -- and the lores blitter, fed 1024-px rows, would write
+               ~2400 px per line into a 604-px-pitch buffer (garbage
+               plus heap overflow). Box-downsample each row 2:1 in
+               place (per-channel floor average via the LSB-exact
+               halving-add identity, as in S9xMode7VertResample) and
+               use the hires path; the 4x sub-pixel detail survives as
+               anti-aliasing. In-place is safe: x ascends, so reads at
+               2x/2x+1 stay ahead of the write at x. */
+            for (int y = 0; y < height; y++)
+            {
+                uint16 *row = GFX.Screen + (size_t) y * (GFX.Pitch >> 1);
+                for (int x = 0; x < 512; x++)
+                {
+                    uint16 a = row[2 * x], b = row[2 * x + 1];
+                    row[x] = ((a & 0xF7DE) >> 1) + ((b & 0xF7DE) >> 1) + (a & b & 0x0821);
+                }
+            }
+            width = 512;
+        }
 
         if (width == 512)
             snes_ntsc_blit_hires(snes_ntsc, GFX.Screen, GFX.Pitch / 2, burst_phase, width, height, snes_ntsc_buffer, MAX_SNES_WIDTH_NTSC * 2);
