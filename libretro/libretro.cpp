@@ -1,4 +1,6 @@
 #include "libretro.h"
+#include <streams/file_stream.h>
+#include <file/file_path.h>
 #include "libretro_core_options.h"
 
 #include "snes9x.h"
@@ -190,6 +192,20 @@ static bool setting_superscope_reverse_buttons = false;
 void retro_set_environment(retro_environment_t cb)
 {
     environ_cb = cb;
+
+    {
+        /* Route all core file I/O through the frontend's VFS when it
+           provides one; filestream falls back to its local
+           implementation otherwise. */
+        struct retro_vfs_interface_info vfs_iface_info;
+        vfs_iface_info.required_interface_version = 1;
+        vfs_iface_info.iface                      = NULL;
+        if (cb(RETRO_ENVIRONMENT_GET_VFS_INTERFACE, &vfs_iface_info))
+        {
+            filestream_vfs_init(&vfs_iface_info);
+            path_vfs_init(&vfs_iface_info);
+        }
+    }
 
     static const struct retro_subsystem_memory_info multi_a_memory[] = {
         { "srm", RETRO_MEMORY_SNES_SUFAMI_TURBO_A_RAM },
@@ -476,10 +492,6 @@ static void update_variables(void)
     Settings.BG_Forced=disabled_layers;
 
     //for some reason, Transparency seems to control both the fixed color and the windowing registers?
-    var.key="snes9x_gfx_clip";
-    var.value=NULL;
-    Settings.DisableGraphicWindows=(environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && !strcmp("disabled", var.value));
-
     var.key="snes9x_gfx_transp";
     var.value=NULL;
     Settings.Transparency=!(environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && !strcmp("disabled", var.value));
@@ -1255,7 +1267,7 @@ static int is_bsx (uint8 *p)
 
 static bool8 LoadBIOS(uint8 *biosrom, const char *biosname, int biossize)
 {
-    FILE	*fp;
+    RFILE	*fp;
     char	name[PATH_MAX + 1];
     bool8 r = FALSE;
 
@@ -1263,22 +1275,22 @@ static bool8 LoadBIOS(uint8 *biosrom, const char *biosname, int biossize)
     strcat(name, SLASH_STR);
     strcat(name, biosname);
 
-    fp = fopen(name, "rb");
+    fp = rfopen(name, "rb");
     if (!fp)
     {
         strcpy(name, S9xGetDirectory(BIOS_DIR).c_str());
         strcat(name, SLASH_STR);
         strcat(name, biosname);
 
-        fp = fopen(name, "rb");
+        fp = rfopen(name, "rb");
     }
 
     if (fp)
     {
         size_t size;
 
-        size = fread((void *) biosrom, 1, biossize, fp);
-        fclose(fp);
+        size = rfread((void *) biosrom, 1, biossize, fp);
+        rfclose(fp);
         if (size == (unsigned int) biossize)
             r = TRUE;
     }
@@ -1561,7 +1573,6 @@ void retro_init(void)
     Settings.MacsRifleMaster = TRUE;
     Settings.FrameTimePAL = 20000;
     Settings.FrameTimeNTSC = 16667;
-    Settings.SixteenBitSound = TRUE;
     Settings.Stereo = TRUE;
     Settings.SoundPlaybackRate = 32040;
     Settings.SoundInputRate = 32040;
@@ -2546,11 +2557,7 @@ void S9xToggleSoundChannel(int) {}
 std::string S9xGetFilenameInc(std::string in, s9x_getdirtype) { return ""; }
 const char* S9xBasename(const char* in) { return in; }
 bool8 S9xInitUpdate() { return TRUE; }
-void S9xExtraUsage() {}
-bool8 S9xOpenSoundDevice() { return TRUE; }
 bool S9xPollAxis(uint32, short*) { return FALSE; }
-void S9xParseArg(char**, int&, int) {}
-void S9xExit() {}
 bool S9xPollPointer(uint32, short*, short*) { return false; }
 
 void S9xMessage(int type, int, const char* s)
