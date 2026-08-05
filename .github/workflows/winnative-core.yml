@@ -124,7 +124,7 @@ jobs:
       - name: Build
         if: steps.src.outputs.changed == 'true'
         run: |
-          "$NDK/ndk-build" -C "libretro/jni" APP_ABI="$ABI" APP_PLATFORM="$PLATFORM"  -j"$(nproc)"
+          "$NDK/ndk-build" -C "libretro/jni" APP_ABI="$ABI" APP_PLATFORM="$PLATFORM" APP_LDFLAGS="-Wl,-z,max-page-size=16384"  -j"$(nproc)"
 
       - name: Collect
         if: steps.src.outputs.changed == 'true'
