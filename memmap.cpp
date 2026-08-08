@@ -39,6 +39,7 @@ uint32_t  BridgeCalculatedSize = 0;
 #include "snapshot.h"
 #include "msu1.h"
 #include "zipfile.h"
+#include "bytestream.h"
 
 #ifndef SET_UI_COLOR
 #define SET_UI_COLOR(r, g, b) ;
@@ -781,9 +782,9 @@ static bool8 is_BSCart_BIOS (const uint8 *, uint32);
 static bool8 is_BSCartSA1_BIOS(const uint8 *, uint32);
 static bool8 is_GNEXT_Add_On (const uint8 *, uint32);
 static uint32 caCRC32 (uint8 *, uint32, uint32 crc32 = 0xffffffff);
-static bool8 ReadUPSPatch (Stream *, long, int32 &);
-static long ReadInt (Stream *, unsigned);
-static bool8 ReadIPSPatch (Stream *, long, int32 &);
+static bool8 ReadUPSPatch (ByteStream *, long, int32 &);
+static long ReadInt (ByteStream *, unsigned);
+static bool8 ReadIPSPatch (ByteStream *, long, int32 &);
 
 // deinterleave
 
@@ -1176,9 +1177,13 @@ int CMemory::ScoreLoROM (bool8 skip_header, int32 romoff)
 	if (CalculatedSize <= 1024 * 1024 * 16)
 		score += 2;
 
-	/* buf[0xd7] < 7 claims a ROM smaller than 16KB: bogus header, penalize.
-	   Also avoids a negative shift count (UB, arch-dependent result). */
-	if (buf[0xd7] < 7 || (1 << (buf[0xd7] - 7)) > 48)
+	/* buf[0xd7] is a size exponent, meaningful only in 7..12 (16 KB..32 MB).
+	   Below 7 the header claims a ROM smaller than 16 KB and above 12 it
+	   exceeds 48 Mbit, both bogus, so penalize. Testing the range rather
+	   than shifting also keeps the shift count in bounds: this byte comes
+	   straight out of the ROM image, so a junk header could ask for a shift
+	   of up to 248, which is undefined and in practice arch-dependent. */
+	if (buf[0xd7] < 7 || buf[0xd7] > 12)
 		score -= 1;
 
 	if (!allASCII(&buf[0xb0], 6))
@@ -1287,7 +1292,7 @@ uint32 CMemory::FileLoader (uint8 *buffer, const char *filename, uint32 maxsize)
 		case FILE_DEFAULT:
 		default:
 		{
-			STREAM	fp = OPEN_STREAM(filename, "rb");
+			FSTREAM	fp = OPEN_FSTREAM(filename, "rb");
 			if (!fp)
 				return (0);
 
@@ -1295,8 +1300,8 @@ uint32 CMemory::FileLoader (uint8 *buffer, const char *filename, uint32 maxsize)
 
 			uint32	size = 0;
 
-			size = READ_STREAM(buffer, maxsize + 0x200, fp);
-			CLOSE_STREAM(fp);
+			size = (uint32) READ_FSTREAM(buffer, maxsize + 0x200, fp);
+			CLOSE_FSTREAM(fp);
 
 			totalSize = HeaderRemove(size, buffer);
 
@@ -1340,7 +1345,6 @@ bool8 CMemory::LoadROM (const char *filename)
     if(!filename || !*filename)
         return FALSE;
 
-    S9xResetSaveTimer(FALSE); // reset oops timer here so that .oops file has rom name of previous rom
 
     int32 totalFileSize;
 
@@ -1613,7 +1617,6 @@ bool8 CMemory::LoadMultiCartMem (const uint8 *sourceA, uint32 sourceASize,
 
 bool8 CMemory::LoadMultiCart (const char *cartA, const char *cartB)
 {
-    S9xResetSaveTimer(FALSE); // reset oops timer here so that .oops file has rom name of previous rom
 
     memset(ROM, 0, MAX_ROM_SIZE);
 	memset(&Multi, 0, sizeof(Multi));
@@ -2396,12 +2399,29 @@ void CMemory::InitROM (void)
 	}
 
 	// SRAM size
+	/* SRAMSize is a header byte, so it is whatever the image says - a bad
+	   dump or a hacked header can hold anything up to 255. Left unclamped,
+	   the shift below is undefined past 28 and the resulting mask outgrows
+	   the 512 KB SRAM allocation from SRAMSize 10 upward, at which point
+	   every masked SRAM access reads and writes past the end of the buffer.
+	   9 is the largest value the allocation can represent. */
+	if (SRAMSize > 9)
+		SRAMSize = 9;
+
 	SRAMMask = SRAMSize ? ((1 << (SRAMSize + 3)) * 128) - 1 : 0;
+
+	if (SRAMMask >= SRAM_SIZE)
+		SRAMMask = SRAM_SIZE - 1;
 	BridgeSRAMMask = SRAMMask;
 	BridgeCalculatedSize = CalculatedSize;
 
 	// checksum
-	if (!isChecksumOK || ((uint32) CalculatedSize > (uint32) (((1 << (ROMSize - 7)) * 128) * 1024)))
+	/* ROMSize is a header byte as well: below 7 the shift count goes
+	   negative and above 12 the result overflows, both undefined. The
+	   comparison only drives a warning colour, so treat anything outside
+	   the meaningful 7..12 range as "header disagrees with the image". */
+	if (!isChecksumOK || ROMSize < 7 || ROMSize > 12 ||
+	    ((uint32) CalculatedSize > (uint32) (((1 << (ROMSize - 7)) * 128) * 1024)))
 	{
 		Settings.DisplayColor = BUILD_PIXEL(31, 31, 0);
 		SET_UI_COLOR(255, 255, 0);
@@ -3595,33 +3615,6 @@ static uint32 XPSdecode (const uint8 *data, uint32 &addr, uint32 size)
 	return offset;
 }
 
-static std::vector<uint8_t> ReadStreamUntilEOF(Stream *r)
-{
-    const size_t max_buffer_size = 4096;
-    std::vector<uint8_t> data;
-    uint8_t buffer[max_buffer_size];
-    size_t total_size = 0;
-    size_t buffer_size = 0;
-
-    int value = 0;
-    while (value != EOF)
-    {
-        value = r->get_char();
-        if (value != EOF)
-            buffer[buffer_size++] = value;
-
-        if (buffer_size == max_buffer_size || (value == EOF && buffer_size > 0))
-        {
-            data.resize(data.size() + buffer_size);
-            memcpy(&data[total_size], buffer, buffer_size);
-            total_size += buffer_size;
-            buffer_size = 0;
-        }
-    }
-
-    return data;
-}
-
 //NOTE: UPS patches are *never* created against a headered ROM!
 //this is per the UPS file specification. however, do note that it is
 //technically possible for a non-compliant patcher to ignore this requirement.
@@ -3631,12 +3624,11 @@ static std::vector<uint8_t> ReadStreamUntilEOF(Stream *r)
 //no-header patching errors that result in IPS patches having a 50/50 chance of
 //being applied correctly.
 
-static bool8 ReadUPSPatch (Stream *r, long, int32 &rom_size)
+static bool8 ReadUPSPatch (ByteStream *r, long, int32 &rom_size)
 {
-	//Reader lacks size() and rewind(), so we need to read in the file to get its size
-	auto data_vector = ReadStreamUntilEOF(r);
-	uint8 *data = &data_vector[0];
-	uint32 size = data_vector.size();
+	/* The cursor exposes the whole buffer, so there is nothing to slurp. */
+	uint8 *data = r->buf + r->pos;
+	uint32 size = (uint32) (r->size - r->pos);
 
 	//4-byte header + 1-byte input size + 1-byte output size + 4-byte patch CRC32 + 4-byte unpatched CRC32 + 4-byte patched CRC32
 	if(size < 18) return false;  //patch is too small
@@ -3702,11 +3694,10 @@ static bool8 ReadUPSPatch (Stream *r, long, int32 &rom_size)
 //
 // logic taken from http://byuu.org/programming/bps and the accompanying source
 //
-static bool8 ReadBPSPatch (Stream *r, long, int32 &rom_size)
+static bool8 ReadBPSPatch (ByteStream *r, long, int32 &rom_size)
 {
-	auto data_vector = ReadStreamUntilEOF(r);
-	uint8 *data = &data_vector[0];
-	uint32 size = data_vector.size();
+	uint8 *data = r->buf + r->pos;
+	uint32 size = (uint32) (r->size - r->pos);
 
 	/* 4-byte header + 1-byte input size + 1-byte output size + 1-byte metadata size
 	   + 4-byte unpatched CRC32 + 4-byte patched CRC32 + 4-byte patch CRC32 */
@@ -3782,13 +3773,13 @@ static bool8 ReadBPSPatch (Stream *r, long, int32 &rom_size)
 	}
 }
 
-static long ReadInt (Stream *r, unsigned nbytes)
+static long ReadInt (ByteStream *r, unsigned nbytes)
 {
 	long	v = 0;
 
 	while (nbytes--)
 	{
-		int	c = r->get_char();
+		int	c = bs_get_char(r);
 		if (c == EOF)
 			return (-1);
 		v = (v << 8) | (c & 0xFF);
@@ -3797,7 +3788,7 @@ static long ReadInt (Stream *r, unsigned nbytes)
 	return (v);
 }
 
-static bool8 ReadIPSPatch (Stream *r, long offset, int32 &rom_size)
+static bool8 ReadIPSPatch (ByteStream *r, long offset, int32 &rom_size)
 {
 	const int32	IPS_EOF = 0x00454F46l;
 	int32		ofs;
@@ -3806,7 +3797,7 @@ static bool8 ReadIPSPatch (Stream *r, long offset, int32 &rom_size)
 	fname[5] = 0;
 	for (int i = 0; i < 5; i++)
 	{
-		int	c = r->get_char();
+		int	c = bs_get_char(r);
 		if (c == EOF)
 			return (0);
 		fname[i] = (char) c;
@@ -3840,7 +3831,7 @@ static bool8 ReadIPSPatch (Stream *r, long offset, int32 &rom_size)
 
 			while (len--)
 			{
-				rchar = r->get_char();
+				rchar = bs_get_char(r);
 				if (rchar == EOF)
 					return (0);
 				Memory.ROM[ofs++] = (uint8) rchar;
@@ -3855,7 +3846,7 @@ static bool8 ReadIPSPatch (Stream *r, long offset, int32 &rom_size)
 			if (rlen == -1)
 				return (0);
 
-			rchar = r->get_char();
+			rchar = bs_get_char(r);
 			if (rchar == EOF)
 				return (0);
 
@@ -3892,14 +3883,31 @@ void CMemory::CheckForAnyPatch(const char *rom_filename, bool8 header, int32 &ro
 
     auto path = splitpath(rom_filename);
 
-    auto try_patch = [&](const char *type, std::string filename, bool8(*read_patch_func)(Stream * r, long offset, int32 &rom_size)) -> bool {
+    auto try_patch = [&](const char *type, std::string filename, bool8(*read_patch_func)(ByteStream * r, long offset, int32 &rom_size)) -> bool {
         if ((patch_file = OPEN_FSTREAM(filename.c_str(), "rb")) != NULL)
         {
             printf("Using %s patch %s", type, filename.c_str());
 
-            Stream *s = new fStream(patch_file);
-            ret = read_patch_func(s, offset, rom_size);
-            s->closeStream();
+            /* Patch readers work over a byte cursor, so slurp the file. The
+               UPS and BPS readers wanted the whole thing in memory anyway,
+               and patches are small. */
+            rfseek(patch_file, 0, SEEK_END);
+            long psize = rftell(patch_file);
+            rfseek(patch_file, 0, SEEK_SET);
+
+            uint8 *pdata = (psize > 0) ? new uint8[psize] : NULL;
+            ret = FALSE;
+
+            if (pdata && (size_t) READ_FSTREAM(pdata, psize, patch_file) == (size_t) psize)
+            {
+                ByteStream bs;
+                bs_init(&bs, pdata, (size_t) psize);
+                ret = read_patch_func(&bs, offset, rom_size);
+            }
+
+            delete[] pdata;
+            CLOSE_FSTREAM(patch_file);
+            patch_file = NULL;
 
             if (ret)
             {
@@ -3950,7 +3958,7 @@ void CMemory::CheckForAnyPatch(const char *rom_filename, bool8 header, int32 &ro
 
         if (zip_archive_open(&ar, rom_filename))
         {
-            auto try_zip_patch = [&](const char *ext, bool8 (*read_patch_func)(Stream * r, long offset, int32 &rom_size)) -> bool {
+            auto try_zip_patch = [&](const char *ext, bool8 (*read_patch_func)(ByteStream * r, long offset, int32 &rom_size)) -> bool {
                 int idx = zip_find_ext(&ar, ext, 0);
                 uint32_t psize = 0;
                 uint8_t *pdata;
@@ -3965,7 +3973,8 @@ void CMemory::CheckForAnyPatch(const char *rom_filename, bool8 header, int32 &ro
                 printf("Using patch %s in %s", ar.entries[idx].name, rom_filename);
 
                 {
-                    memStream ms(pdata, psize);
+                    ByteStream ms;
+                    bs_init(&ms, pdata, psize);
                     ret = read_patch_func(&ms, offset, rom_size);
                 }
                 free(pdata);
@@ -4015,7 +4024,7 @@ void CMemory::CheckForAnyPatch(const char *rom_filename, bool8 header, int32 &ro
     if (path.ext_is(".msu1"))
     {
         // zip entries are read by offset rather than as a stream, so pull the
-        // whole patch into memory and hand ReadBPSPatch a memStream. BPS
+        // whole patch into memory and hand ReadBPSPatch a cursor over it. BPS
         // patches in these packs are a few hundred KB at most.
         struct zip_archive ar;
 
@@ -4027,7 +4036,8 @@ void CMemory::CheckForAnyPatch(const char *rom_filename, bool8 header, int32 &ro
 
             if (pdata)
             {
-                memStream ms(pdata, psize);
+                ByteStream ms;
+                bs_init(&ms, pdata, psize);
                 printf("Using BPS patch from msu1");
                 ret = ReadBPSPatch(&ms, offset, rom_size);
 
