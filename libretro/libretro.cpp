@@ -90,9 +90,15 @@ const int MAX_SNES_WIDTH_NTSC = ((SNES_NTSC_OUT_WIDTH(256) + 3) / 4) * 4;
 
 static bool show_lightgun_settings = true;
 static bool show_advanced_av_settings = true;
-/* snes9x_msu1_enhanced_audio core option; latched into the playback rate at
-   content load by msu1_update_playback_rate(). */
-static bool msu1_enhanced_pref = true;
+/* snes9x_msu1_enhanced_audio core option. The live user preference and the
+   value the audio pipeline actually runs on are kept separate: the preference
+   is only copied into msu1_enhanced_latched at content load, immediately
+   before the frontend queries retro_get_system_av_info(). That keeps the
+   reported sample rate and the rate the core emits at in agreement for the
+   whole lifetime of the loaded content, with no need to renegotiate av_info
+   from inside a load callback. */
+static bool msu1_enhanced_pref    = true;
+static bool msu1_enhanced_latched = false;
 
 static void extract_basename(char *buf, const char *path, size_t size)
 {
@@ -449,8 +455,20 @@ static void update_variables(void)
     {
         int freq = atoi(var.value);
         Settings.SuperFXClockMultiplier = freq;
-        SuperFXSpeedPerLineHz = (uint32) ((uint64) 4378500 * freq / 100);
+        /* 6255000 is snes9x2010's default per-line budget (625500 per MHz at
+           its "10 MHz" default); the GSU executor and its per-opcode cycle
+           costs are snes9x2010's, so 100% here must mean the same speed the
+           reference core ships with (libretro/snes9x#314). */
+        SuperFXSpeedPerLineHz = (uint32) ((uint64) 6255000 * freq / 100);
+        SuperFXHwTimingPct = freq;
+        S9xSuperFXRecomputeSpeedPerLine();
     }
+
+    var.key = "snes9x_superfx_timing";
+    var.value = NULL;
+
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var))
+        fx_hw_timing = !strcmp(var.value, "hardware") ? 1 : 0;
 
     var.key = "snes9x_up_down_allowed";
     var.value = NULL;
@@ -876,14 +894,14 @@ static void update_variables(void)
     }
 }
 
-/* Silence sent while audio is hard-disabled. Sized for the worst frame the
-   DSP can hand us: PAL at ~641 stereo frames plus headroom for the APU
-   speedup hack. Never written to, so it costs nothing but BSS. */
-#define MUTE_BUFFER_FRAMES 768
-
-/* 44.1 kHz needs more room per frame than the SPC rate: PAL worst case is
-   44100/50 = 882 frames, plus headroom for the APU speedup hack. */
-#define MSU1_ENH_FRAMES 1024
+/* Chunk size for the enhanced-audio upsampler's output staging buffer. This is
+   not a worst case: audio_upload_samples() loops until the input batch is
+   consumed, uploading a chunk at a time, so no frame count has to fit here.
+   That matters because the input batch is not bounded by the per-frame sample
+   count - S9xDrainAudio hands over whatever the DSP accumulated, up to a full
+   2048-frame landing buffer, which at the 44100/32040 output ratio would want
+   2818 output frames. */
+#define MSU1_ENH_CHUNK 1024
 
 /* True while the enhanced upsampler holds valid in-flight state; cleared
    whenever the enhanced path is not the one feeding the frontend, so state
@@ -892,7 +910,7 @@ static bool msu1_enh_running = false;
 
 static bool msu1_enhanced_active(void)
 {
-    return msu1_enhanced_pref && Settings.MSU1;
+    return msu1_enhanced_latched && Settings.MSU1;
 }
 
 /* The frontend is clocked at 44.1 kHz scaled by however far the SPC rate has
@@ -920,25 +938,23 @@ static void audio_upload_samples(void)
     if (count <= 0)
         return;
 
-    /* Muted means hard-disabled (see retro_run): the APU output is not
-       meaningful, but the callback still has to run or the frontend's ring
-       drains. A static zero buffer covers the largest frame we can produce. */
+    /* Muted means hard-disabled (see retro_run), which is a promise from the
+       frontend that it will never need this audio - libretro.h says as much,
+       and RetroArch only ever sets the bit around runahead's discarded frames,
+       where it has suspended its own consumption for the same frames.
+       audio_driver_sample_batch() returns on the suspended flag before it
+       reads anything the core hands over, so uploading here would be filling a
+       buffer nobody looks at. Drop the frame instead.
+
+       In practice this is unreachable now that the DSP declines to run at all
+       under the same flag - the drain above reports nothing and the function
+       has already returned - but the flag is the contract and the check is
+       where the contract belongs. */
     if (Settings.Mute || !msu1_enhanced_active())
         msu1_enh_running = false;
 
     if (Settings.Mute)
-    {
-        static const int16_t silence[MUTE_BUFFER_FRAMES * 2] = { 0 };
-
-        int frames = count >> 1;
-        while (frames > 0)
-        {
-            int chunk = (frames > MUTE_BUFFER_FRAMES) ? MUTE_BUFFER_FRAMES : frames;
-            audio_batch_cb(silence, (size_t) chunk);
-            frames -= chunk;
-        }
         return;
-    }
 
     /* MSU-1 Enhanced Audio: run the frame at 44.1 kHz so the MSU-1 stream
        mixes in at its native rate instead of being decimated to the SPC's
@@ -947,7 +963,7 @@ static void audio_upload_samples(void)
        so they survive savestates and rollback. */
     if (msu1_enhanced_active())
     {
-        static int16_t enh_buffer[MSU1_ENH_FRAMES * 2];
+        static int16_t enh_buffer[MSU1_ENH_CHUNK * 2];
 
         int16_t  cur_l = (int16_t) MSU1.MSU1_EnhCurL;
         int16_t  cur_r = (int16_t) MSU1.MSU1_EnhCurR;
@@ -958,10 +974,10 @@ static void audio_upload_samples(void)
 
         int      in_frames  = count >> 1;
         int      in_pos     = 0;
-        int      out_frames = 0;
         uint32_t in_rate    = S9xGetAudioSampleRate();
         uint32_t out_rate   = msu1_enhanced_output_rate();
-        uint64_t step       = ((uint64_t) in_rate << 32) / out_rate;
+        uint64_t step       = out_rate
+                            ? (((uint64_t) in_rate << 32) / out_rate) : 0;
 
         if (!msu1_enh_running)
         {
@@ -970,42 +986,77 @@ static void audio_upload_samples(void)
             msu1_enh_running = true;
         }
 
-        while (fill < 2 && in_pos < in_frames)
+        /* A zero step would leave the phase standing still: the emit loop
+           would fill a chunk without consuming an input frame and the outer
+           loop would never terminate. out_rate is in_rate scaled by
+           44100/32040 so this is unreachable, but the loop's termination
+           argument rests on it, so bail rather than trust the arithmetic. */
+        if (!step)
         {
-            if (fill == 0) { cur_l = src[in_pos * 2]; cur_r = src[in_pos * 2 + 1]; }
-            else           { nxt_l = src[in_pos * 2]; nxt_r = src[in_pos * 2 + 1]; }
-            fill++;
-            in_pos++;
+            msu1_enh_running = false;
+            return;
         }
 
-        while (fill == 2 && out_frames < MSU1_ENH_FRAMES)
+        /* One pass per output chunk. The upsampler state carries across
+           passes exactly as it carries across batches, so a batch that spans
+           several chunks is indistinguishable from several smaller batches -
+           no input frame is dropped at a chunk boundary. */
+        for (;;)
         {
-            /* 64-bit product: |nxt - cur| * t reaches 65535 * 65535, which
-               overflows int32 on full-scale transients. */
-            uint32_t t = (uint32_t) (frac >> 16) & 0xffff;
-            enh_buffer[out_frames * 2] = (int16_t) (cur_l +
-                (int32_t) (((int64_t) (nxt_l - cur_l) * (int32_t) t) >> 16));
-            enh_buffer[out_frames * 2 + 1] = (int16_t) (cur_r +
-                (int32_t) (((int64_t) (nxt_r - cur_r) * (int32_t) t) >> 16));
-            out_frames++;
+            int out_frames = 0;
 
-            frac += step;
-            while (frac >= ((uint64_t) 1 << 32))
+            while (fill < 2 && in_pos < in_frames)
             {
-                frac -= (uint64_t) 1 << 32;
-                cur_l = nxt_l; cur_r = nxt_r;
-                if (in_pos < in_frames)
+                if (fill == 0) { cur_l = src[in_pos * 2]; cur_r = src[in_pos * 2 + 1]; }
+                else           { nxt_l = src[in_pos * 2]; nxt_r = src[in_pos * 2 + 1]; }
+                fill++;
+                in_pos++;
+            }
+
+            /* Short of a frame pair: the rest arrives with the next batch. */
+            if (fill < 2)
+                break;
+
+            while (fill == 2 && out_frames < MSU1_ENH_CHUNK)
+            {
+                /* 64-bit product: |nxt - cur| * t reaches 65535 * 65535, which
+                   overflows int32 on full-scale transients. */
+                uint32_t t = (uint32_t) (frac >> 16) & 0xffff;
+                enh_buffer[out_frames * 2] = (int16_t) (cur_l +
+                    (int32_t) (((int64_t) (nxt_l - cur_l) * (int32_t) t) >> 16));
+                enh_buffer[out_frames * 2 + 1] = (int16_t) (cur_r +
+                    (int32_t) (((int64_t) (nxt_r - cur_r) * (int32_t) t) >> 16));
+                out_frames++;
+
+                frac += step;
+                while (frac >= ((uint64_t) 1 << 32))
                 {
-                    nxt_l = src[in_pos * 2];
-                    nxt_r = src[in_pos * 2 + 1];
-                    in_pos++;
-                }
-                else
-                {
-                    fill = 1;   /* nxt refills from the next batch */
-                    break;
+                    frac -= (uint64_t) 1 << 32;
+                    cur_l = nxt_l; cur_r = nxt_r;
+                    if (in_pos < in_frames)
+                    {
+                        nxt_l = src[in_pos * 2];
+                        nxt_r = src[in_pos * 2 + 1];
+                        in_pos++;
+                    }
+                    else
+                    {
+                        fill = 1;   /* nxt refills from the next batch */
+                        break;
+                    }
                 }
             }
+
+            if (out_frames > 0)
+            {
+                S9xMSU1Mix(enh_buffer, (size_t) out_frames, out_rate);
+                audio_batch_cb(enh_buffer, (size_t) out_frames);
+            }
+
+            /* Input exhausted; anything else is a full chunk and there is
+               more where it came from. */
+            if (fill < 2)
+                break;
         }
 
         MSU1.MSU1_EnhCurL = cur_l; MSU1.MSU1_EnhCurR = cur_r;
@@ -1013,11 +1064,6 @@ static void audio_upload_samples(void)
         MSU1.MSU1_EnhFrac = frac;
         MSU1.MSU1_EnhFill = (uint8_t) fill;
 
-        if (out_frames > 0)
-        {
-            S9xMSU1Mix(enh_buffer, (size_t) out_frames, out_rate);
-            audio_batch_cb(enh_buffer, (size_t) out_frames);
-        }
         return;
     }
 
@@ -1422,21 +1468,20 @@ static bool8 is_SufamiTurbo_Cart (const uint8 *data, uint32 size)
    decimates them through an interpolator with no anti-alias filtering, which
    folds 16.02-22.05 kHz track content down into the 10-16 kHz band as audible
    hiss (libretro/snes9x#309). The enhanced path avoids that by running the
-   frame at 44.1 kHz - see audio_upload_samples. The rate reported to the
-   frontend changes with it, so the frontend has to be told. */
-static void msu1_update_playback_rate(void)
-{
-    static bool last_enhanced = false;
-    bool enhanced = msu1_enhanced_active();
+   frame at 44.1 kHz - see audio_upload_samples. That changes the rate the core
+   emits at, so the frontend has to agree on it.
 
-    if (enhanced != last_enhanced)
-    {
-        struct retro_system_av_info av_info;
-        last_enhanced = enhanced;
-        msu1_enh_running = false;
-        retro_get_system_av_info(&av_info);
-        environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av_info);
-    }
+   It is told the ordinary way: retro_get_system_av_info() reports the enhanced
+   rate, and the frontend calls it once, straight after retro_load_game()
+   returns. Nothing has to be renegotiated, so this runs at the tail of the
+   load path with no environment call attached. SET_SYSTEM_AV_INFO would be
+   wrong here twice over - it may only be issued from retro_run(), and it tears
+   down and rebuilds the frontend's audio and video drivers, which at this
+   point in the load sequence have not necessarily been brought up yet. */
+static void msu1_latch_playback_rate(void)
+{
+    msu1_enhanced_latched = msu1_enhanced_pref;
+    msu1_enh_running      = false;
 }
 
 bool retro_load_game(const struct retro_game_info *game)
@@ -1500,7 +1545,7 @@ bool retro_load_game(const struct retro_game_info *game)
     if (!rom_loaded && log_cb)
         log_cb(RETRO_LOG_ERROR, "ROM loading failed...\n");
 
-    msu1_update_playback_rate();
+    msu1_latch_playback_rate();
 
     Memory.ClearSRAM();
 
@@ -1636,7 +1681,7 @@ bool retro_load_game_special(unsigned game_type, const struct retro_game_info *i
         g_geometry_update = true;
     }
 
-    msu1_update_playback_rate();
+    msu1_latch_playback_rate();
 
     return rom_loaded;
 }
@@ -2238,11 +2283,13 @@ void retro_run()
            resulting state is discarded or restored afterwards. Suspension
            costs output, never state. */
         S9xSetSoundMute(hardDisableAudio);
+        Settings.HardDisableAudio = hardDisableAudio;
     }
     else
     {
         IPPU.RenderThisFrame = true;
         S9xSetSoundMute(false);
+        Settings.HardDisableAudio = FALSE;
     }
 
     poll_cb();

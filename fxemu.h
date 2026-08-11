@@ -179,6 +179,9 @@ struct FxInfo_s
 extern struct FxInfo_s	SuperFX;
 
 void S9xResetSuperFX (void);
+void S9xSuperFXCelDelayTick (void);
+extern int fx_cel_delay;
+void S9xSuperFXRecomputeSpeedPerLine (void);
 void S9xInitSuperFX (void);
 void S9xSetSuperFX (uint8_t byte, uint16_t address);
 uint8_t S9xGetSuperFX (uint16_t address);
@@ -186,6 +189,8 @@ uint8_t S9xGetSuperFX (uint16_t address);
 /* Bridges to the C++ side. */
 extern uint8_t  *SFXFillRAM;             /* = Memory.FillRAM */
 extern uint32_t  SuperFXSpeedPerLineHz;  /* GSU Hz x 0.417 duty; scaled by the overclock option */
+extern int       fx_hw_timing;           /* 0 = compat budget, 1 = hardware-derived GSU costs */
+extern uint32_t  SuperFXHwTimingPct;     /* overclock percentage for the hardware budget */
 extern uint8_t   SuperFXPalFlag;
 void S9xSuperFXIRQHook (void);           /* CPU.IRQExternal = TRUE  (cpu.cpp) */
 void S9xSuperFXIRQClearHook (void);      /* CPU.IRQExternal = FALSE (cpu.cpp) */
